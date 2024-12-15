@@ -1,0 +1,386 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Lambda that calls Fargate to scrape a song from Suno.com and then monitors the status of the scraping job
+Transform:
+- AWS::Serverless-2016-10-31
+
+Resources:
+  LambdaVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-Lambda-VPC
+
+  LambdaPublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref LambdaVPC
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      CidrBlock: 10.0.1.0/24
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-Lambda-Public-Subnet-1
+
+  LambdaPrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref LambdaVPC
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      CidrBlock: 10.0.2.0/24
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-Lambda-Private-Subnet-1
+
+  LambdaInternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-Lambda-IGW
+
+  LambdaVPCGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref LambdaVPC
+      InternetGatewayId: !Ref LambdaInternetGateway
+
+  LambdaNatGatewayEIP:
+    Type: AWS::EC2::EIP
+    DependsOn: LambdaVPCGatewayAttachment
+    Properties:
+      Domain: vpc
+
+  LambdaNatGateway:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt LambdaNatGatewayEIP.AllocationId
+      SubnetId: !Ref LambdaPublicSubnet1
+
+  LambdaPublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref LambdaVPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-Lambda-Public-RT
+
+  LambdaPrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref LambdaVPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-Lambda-Private-RT
+
+  LambdaPublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: LambdaVPCGatewayAttachment
+    Properties:
+      RouteTableId: !Ref LambdaPublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref LambdaInternetGateway
+
+  LambdaPrivateRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref LambdaPrivateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref LambdaNatGateway
+
+  LambdaPublicSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref LambdaPublicSubnet1
+      RouteTableId: !Ref LambdaPublicRouteTable
+
+  LambdaPrivateSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref LambdaPrivateSubnet1
+      RouteTableId: !Ref LambdaPrivateRouteTable
+
+  LambdaSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for Lambda functions
+      VpcId: !Ref LambdaVPC
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          FromPort: -1
+          ToPort: -1
+          CidrIp: 0.0.0.0/0
+
+  scrapeSunoSongFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: src/handlers/scrape-suno-song.scrapeSunoSongHandler
+      Runtime: nodejs20.x
+      Architectures:
+      - x86_64
+      MemorySize: 512
+      Timeout: 30
+      Description: A Lambda function that calls a Fargate container to create and download a song from Suno.com
+      Environment:
+        Variables:
+          ECS_CLUSTER: !Ref ECSCluster
+          TASK_DEFINITION: !Ref ECSTaskDefinition
+          SUBNETS: !Ref FargateSubnets
+          SECURITY_GROUPS: !Ref FargateSecurityGroups
+          CONTAINER_NAME: !Ref ContainerName
+          TARGET_REGION: !Ref TargetRegion
+          SUPABASE_JWT_SECRET: !Ref SupabaseJWTSecret
+          SUPABASE_ANON_KEY: !Ref SupabaseAnonKey
+          SUPABASE_URL: !Ref SupabaseURL
+          SENDGRID_API_KEY: !Ref SendGridAPIKey
+          SENDGRID_TO: !Ref SendGridTo
+          SENDGRID_FROM: !Ref SendGridFrom
+          NODE_OPTIONS: !Ref NodeOptions
+          ASYNC_EXECUTION: "true"
+          LOG_LEVEL: DEBUG
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            Path: /scrape-suno-song
+            Method: POST
+            RestApiId: !Ref ServerlessRestApi
+            Auth:
+              ApiKeyRequired: true
+      VpcConfig:
+        SecurityGroupIds: 
+          - !Ref LambdaSecurityGroup
+        SubnetIds: 
+          - !Ref LambdaPrivateSubnet1
+      Tracing: Active
+      Tags:
+        Environment: !Ref Environment
+        Project: BackpackLambda
+
+  checkSongStatusFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: src/handlers/check-song-status.checkSongStatusHandler
+      Runtime: nodejs20.x
+      Architectures:
+      - x86_64
+      MemorySize: 512
+      Timeout: 30
+      Description: A Lambda function that checks the status of a song scraping job
+      Environment:
+        Variables:
+          ECS_CLUSTER: !Ref ECSCluster
+          TARGET_REGION: !Ref TargetRegion
+          SUPABASE_JWT_SECRET: !Ref SupabaseJWTSecret
+          SUPABASE_ANON_KEY: !Ref SupabaseAnonKey
+          SUPABASE_URL: !Ref SupabaseURL
+          SENDGRID_API_KEY: !Ref SendGridAPIKey
+          SENDGRID_TO: !Ref SendGridTo
+          SENDGRID_FROM: !Ref SendGridFrom
+          NODE_OPTIONS: !Ref NodeOptions
+          LOG_LEVEL: DEBUG
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            Path: /check-song-status
+            Method: GET
+            RestApiId: !Ref ServerlessRestApi
+            Auth:
+              ApiKeyRequired: true
+      VpcConfig:
+        SecurityGroupIds: 
+          - !Ref LambdaSecurityGroup
+        SubnetIds: 
+          - !Ref LambdaPrivateSubnet1
+      Tracing: Active
+
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+        - arn:aws:iam::aws:policy/AWSXrayWriteOnlyAccess
+      Policies:
+        - PolicyName: LambdaPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sqs:SendMessage
+                  - sqs:DeleteMessage
+                  - sqs:ReceiveMessage
+                  - sns:Publish
+                  - ecs:RunTask
+                  - ecs:DescribeTasks
+                  - iam:PassRole
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: 
+                  - !Ref ECSTaskDefinition
+                  - !Sub arn:aws:ecs:${AWS::Region}:${AWS::AccountId}:cluster/${ECSCluster}
+                  - !Sub arn:aws:iam::${AWS::AccountId}:role/*
+                  - !Sub arn:aws:ecs:${AWS::Region}:${AWS::AccountId}:task/*
+                  - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*
+
+  ServerlessRestApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: !Ref Environment
+      TracingEnabled: true
+      MethodSettings:
+        - LoggingLevel: DEBUG
+          ResourcePath: '/*'
+          HttpMethod: '*'
+      DefinitionBody:
+        swagger: "2.0"
+        info:
+          title: "API for Suno Song Scraping"
+        paths:
+          /scrape-suno-song:
+            post:
+              x-amazon-apigateway-integration:
+                httpMethod: POST
+                type: aws_proxy
+                uri:
+                  Fn::Sub: arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${scrapeSunoSongFunction.Arn}/invocations
+              responses: {}
+          /check-song-status:
+            get:
+              x-amazon-apigateway-integration:
+                httpMethod: POST
+                type: aws_proxy
+                uri:
+                  Fn::Sub: arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${checkSongStatusFunction.Arn}/invocations
+              responses: {}
+
+  ApiGatewayUsagePlan:
+    Type: AWS::ApiGateway::UsagePlan
+    DependsOn: ApiGatewayStage
+    Properties:
+      ApiStages: 
+        - ApiId: !Ref ServerlessRestApi
+          Stage: !Ref Environment
+      Description: Usage plan for Suno Song Scraping API
+      Throttle: 
+        BurstLimit: 500
+        RateLimit: 250
+
+  ApiGatewayApiKey:
+    Type: AWS::ApiGateway::ApiKey
+    Properties:
+      Enabled: true
+      Name: "DiscordBotKey"
+
+  ApiGatewayUsagePlanKey:
+    Type: AWS::ApiGateway::UsagePlanKey
+    Properties:
+      KeyId: !Ref ApiGatewayApiKey
+      KeyType: API_KEY
+      UsagePlanId: !Ref ApiGatewayUsagePlan
+
+  ApiGatewayStage:
+    Type: AWS::ApiGateway::Stage
+    Properties:
+      DeploymentId: !Ref ServerlessRestApiDeployment
+      RestApiId: !Ref ServerlessRestApi
+      StageName: !Ref Environment
+      TracingEnabled: true
+      MethodSettings:
+        - ResourcePath: '/*'
+          HttpMethod: '*'
+          ThrottlingBurstLimit: 500
+          ThrottlingRateLimit: 250
+
+  ServerlessRestApiDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn: 
+      - scrapeSunoSongFunction
+      - checkSongStatusFunction
+      - ServerlessRestApi
+    Properties:
+      RestApiId: !Ref ServerlessRestApi
+
+Parameters:
+  ECSCluster:
+    Type: String
+    Description: The name of the ECS cluster
+  ECSTaskDefinition:
+    Type: String
+    Description: The ARN of the ECS task definition
+  FargateSubnets:
+    Type: String
+    Description: Comma-separated list of subnet IDs for the Fargate tasks
+  FargateSecurityGroups:
+    Type: String
+    Description: Comma-separated list of security group IDs for the Fargate tasks
+  ContainerName:
+    Type: String
+    Description: The name of the container in the task definition
+  TargetRegion:
+    Type: String
+    Description: The AWS region the Fargate task is deployed on
+  SupabaseJWTSecret:
+    Type: String
+    Description: The Supabase JWT secret used to create JWT tokens for custom claims
+  SupabaseAnonKey:
+    Type: String
+    Description: The Supabase anon key used when calling the DB
+  SupabaseURL:
+    Type: String
+    Description: The URL of my Supabase project
+  SendGridAPIKey:
+    Type: String
+    Description: The SendGrid API key used to send Lambda errors to an email
+  SendGridTo:
+    Type: String
+    Description: The email that receives error logs
+  SendGridFrom:
+    Type: String
+    Description: The email that sends error logs
+  NodeOptions:
+    Type: String
+    Description: Node.js options to run the Lambda
+  Environment:
+    Type: String
+    Default: Production
+    AllowedValues:
+      - Development
+      - Staging
+      - Production
+    Description: The deployment environment
+
+Outputs:
+  ScrapeSunoSongApi:
+    Description: "API Gateway endpoint URL for scraping Suno songs"
+    Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/${ApiGatewayStage}/scrape-suno-song"
+  CheckSongStatusApi:
+    Description: "API Gateway endpoint URL for checking song status"
+    Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/${ApiGatewayStage}/check-song-status"
+  LambdaFunctionName:
+    Description: "Name of the Lambda function"
+    Value: !Ref scrapeSunoSongFunction
+
+Globals:
+  Function:
+    Tracing: Active
+    LoggingConfig:
+      LogFormat: JSON
+      LogGroup: !Sub '/aws/lambda/${AWS::StackName}'
+  Api:
+    TracingEnabled: true

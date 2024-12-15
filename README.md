@@ -1,0 +1,138 @@
+# Suno Music Lambda
+
+This project contains AWS Lambda functions that are meant to call an ECR container in order to scrape a song from Suno.com. The Lambdas should be called by a Discord bot.
+
+## Deploy the Sample Application
+
+The AWS SAM CLI is an extension of the AWS CLI that adds functionality for building and testing Lambda applications. It uses Docker to run your functions in an Amazon Linux environment that matches Lambda. It can also emulate your application's build environment and API.
+
+To use the AWS SAM CLI and deploy the BackPack Lambda, you need the following tools:
+
+* AWS SAM CLI - [Install the AWS SAM CLI](https://docs.aws.amazon.com/serverless-application-model/latest/developerguide/serverless-sam-cli-install.html).
+* Node.js - [Install Node.js 20](https://nodejs.org/en/), including the npm package management tool.
+* Docker - [Install Docker community edition](https://hub.docker.com/search/?type=edition&offering=community).
+* jq - [Install jq](https://jqlang.github.io/jq/download/)
+
+To build and deploy your application for the first time, you first need to make sure that your S3 buckets are deployed: 
+
+```bash
+my-application$ aws s3 mb s3://suno-music-lambda-dev --region your-region-here
+my-application$ aws s3 mb s3://suno-music-lambda-staging --region your-region-here
+my-application$ aws s3 mb s3://suno-music-lambda-prod --region your-region-here
+```
+
+And then run the following in your shell:
+
+```bash
+my-application$ sam build
+my-application$ sam deploy --guided --stack-name suno-music-lambda --s3-bucket suno-music-lambda-dev \
+--parameter-overrides $(jq -r '.Parameters | to_entries | map("\(.key)=\(.value|tostring)") | join(" ")' env.json) \
+--capabilities CAPABILITY_IAM CAPABILITY_AUTO_EXPAND
+```
+
+The first command will build the source of your application. The second command will package and deploy your application to AWS, with a series of prompts:
+
+* **Stack Name**: The name of the stack to deploy to CloudFormation. This should be unique to your account and region, and a good starting point would be something matching your project name.
+* **AWS Region**: The AWS region you want to deploy your app to.
+* **Confirm changes before deploy**: If set to yes, any change sets will be shown to you before execution for manual review. If set to no, the AWS SAM CLI will automatically deploy application changes.
+* **Allow SAM CLI IAM role creation**: Many AWS SAM templates, including this example, create AWS IAM roles required for the AWS Lambda function(s) included to access AWS services. By default, these are scoped down to minimum required permissions.
+* **Save arguments to samconfig.toml**: If set to yes, your choices will be saved to a configuration file inside the project, so that in the future you can just re-run `sam deploy` without parameters to deploy changes to your application.
+
+The API Gateway endpoint API will be displayed in the outputs when the deployment is complete.
+
+## Use the AWS SAM CLI to Build and Test Locally
+
+Build your application by using the `sam build` command.
+
+```bash
+my-application$ sam build
+```
+
+The AWS SAM CLI installs dependencies that are defined in `package.json`, creates a deployment package, and saves it in the `.aws-sam/build` folder.
+
+Test a single function by invoking it directly with a test event. An event is a JSON document that represents the input that the function receives from the event source. Test events are included in the `events` folder in this project.
+
+Run functions locally and invoke them with the `sam local invoke` command.
+
+```bash
+my-application$ sam local invoke scrapeSunoSongFunction --event events/scrape-suno-song.json --env-vars env.json
+my-application$ sam local invoke checkSongStatusFunction --event events/check-song-status.json --env-vars env.json
+```
+
+Or if you want to debug your Lambda:
+
+```bash
+my-application$ sam local invoke scrapeSunoSongFunction --event events/scrape-suno-song.json --env-vars env.json --debug-port 5858
+my-application$ sam local invoke checkSongStatusFunction --event events/check-song-status.json --env-vars env.json --debug-port 5858
+```
+
+The AWS SAM CLI can also emulate your application's API. Use the `sam local start-api` command to run the API locally on port 3000.
+
+```bash
+my-application$ sam local start-api --env-vars env.json
+my-application$ curl -X POST http://localhost:3000/scrape-suno-song -H "Content-Type: application/json" -d '{"generation_id":"28342f33-8a12-4d15-bcc1-54643a3d504c","song_description":"A happy pop song about clouds","phone_number":"numberhere"}'
+my-application$ curl -X GET 'http://localhost:3000/check-song-status?generation_id=28342f33-8a12-4d15-bcc1-54643a3d504c&ecs_task_arn=arn:aws:ecs:your-region-here:aws-account-id:task/fargate-suno-scraper-cluster/id'
+```
+
+## Fetch, Tail and Filter Lambda Function Logs
+
+To simplify troubleshooting, the AWS SAM CLI has a command called `sam logs`. `sam logs` lets you fetch logs that are generated by your Lambda function from the command line. In addition to printing the logs on the terminal, this command has several nifty features to help you quickly find the bug.
+
+**NOTE:** This command works for all Lambda functions, not just the ones you deploy using AWS SAM.
+
+```bash
+my-application$ sam logs -n scrapeSunoSongFunction --stack-name suno-music-lambda --tail
+```
+
+Or, if you want to use a specific AWS profile:
+
+```bash
+my-application$ sam local invoke scrapeSunoSongFunction --event events/scrape-suno-song.json --env-vars env.json --profile your-production-profile
+```
+
+**NOTE:** This uses the logical name of the function within the stack. This is the correct name to use when searching logs inside an AWS Lambda function within a CloudFormation stack, even if the deployed function name varies due to CloudFormation's unique resource name generation.
+
+You can find more information and examples about filtering Lambda function logs in the [AWS SAM CLI documentation](https://docs.aws.amazon.com/serverless-application-model/latest/developerguide/serverless-sam-cli-logging.html).
+
+When it comes to fetching logs from previous Fargate runs, you first need to search for a task ID:
+
+```bash
+my-application$ aws ecs list-tasks --cluster fargate-suno-scraper-cluster
+```
+
+Then, you need to get the task logstreams:
+
+```bash
+my-application$ aws ecs describe-tasks --cluster fargate-suno-scraper-cluster --tasks <task-id>
+```
+
+And finally get the logs from a specific stream:
+
+```bash
+my-application$ aws logs get-log-events --log-group-name /ecs/fargate-suno-scraper-task --log-stream-name <log-stream-name>
+```
+
+## Unit tests
+
+Tests are defined in the `__tests__` folder in this project. Use `npm` to install the [Jest test framework](https://jestjs.io/) and run unit tests.
+
+```bash
+my-application$ npm install
+my-application$ npm test
+```
+
+## Cleanup
+
+To delete the Lambdas and their associated buckets, use the AWS CLI. Assuming you used your project name for the stack name, you can run the following:
+
+```bash
+my-application$ sam delete --stack-name suno-music-lambda
+my-application$ aws s3 rb s3://suno-music-lambda-dev --region your-region-here --force
+my-application$ aws s3 rb s3://suno-music-lambda-staging --region your-region-here --force
+my-application$ aws s3 rb s3://suno-music-lambda-prod --region your-region-here --force
+```
+
+If you wanna check that your stack was deleted, do:
+```bash
+my-application$ aws cloudformation describe-stacks --stack-name suno-music-lambda
+```

@@ -1,0 +1,7 @@
+{
+    "httpMethod": "GET",
+    "queryStringParameters": {
+      "generation_id": "",
+      "ecs_task_arn": "arn:aws:ecs:your-region-here:aws-account-id:task/fargate-suno-scraper-cluster/id"
+    }
+}

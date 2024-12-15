@@ -1,0 +1,4 @@
+{
+    "httpMethod": "POST",
+    "body": "{\"generation_id\": \"\",\"max_runtime\": \"600\",\"phone_number\": \"numberhere\"}"
+}
